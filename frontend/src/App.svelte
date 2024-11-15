@@ -1,9 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { GetVersion, Trace, GetPublicIP } from "../wailsjs/go/main/App.js";
+  import {
+    GetVersion,
+    Trace,
+    GetPublicIP,
+    StopTrace,
+    GetInterfaces,
+  } from "../wailsjs/go/main/App.js";
   import { EventsOn } from "../wailsjs/runtime/runtime";
   import "./style.css";
   import { fly } from "svelte/transition";
+  import "@material/web/button/filled-button.js";
+  import "@material/web/textfield/outlined-text-field.js";
+  import "@material/web/progress/circular-progress.js";
+  import "@material/web/select/outlined-select.js";
+  import "@material/web/select/select-option.js";
+  import type { MdOutlinedTextField } from "@material/web/textfield/outlined-text-field";
+  import type { MdOutlinedSelect } from "@material/web/select/outlined-select.js";
 
   interface Hop {
     number: number;
@@ -11,6 +24,8 @@
     ipeeInfo: IPEEInfo;
     rtt: number;
     isPrivate: boolean;
+    timedOut: boolean;
+    tcp :{rst:boolean}
   }
 
   interface IPEEInfo {
@@ -20,9 +35,11 @@
     organizationName: string;
   }
 
-  let ip: string = "";
-  let maxHops: number = 32;
-  let timeout: number = 1000;
+  let ip: MdOutlinedTextField;
+  let maxHops: MdOutlinedTextField;
+  let timeout: MdOutlinedTextField;
+  let destinationPort: MdOutlinedTextField;
+  let mss: MdOutlinedTextField;
   let error: string = "";
   let loading: boolean = false;
   let hopsEelement: HTMLDivElement;
@@ -30,15 +47,40 @@
   let route = [];
   let version = "";
   let publicIP = "";
+  let lastSuccessfulDestination = "";
+  let bindOn: MdOutlinedSelect;
+  let protocol: MdOutlinedSelect;
+  let protocolValue = "ICMP"
+  let interfaces: string[][] = [];
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   async function trace() {
     try {
-      loading = true;
-      ip = ip.trim();
       error = "";
-      for (const key in hops) delete hops[key];
+      loading = true;
+      ip.value = ip.value.trim();
       route = [];
-      error = await Trace(ip, maxHops, timeout);
+      hops = {};
+      await sleep(500);
+      error = await Trace(
+        bindOn.value,
+        ip.value,
+        Number(maxHops.value),
+        Number(timeout.value),
+        protocol.value,
+        Number(destinationPort.value),
+        Number(mss.value)
+      );
+      lastSuccessfulDestination = error === "" ? ip.value : "";
+      for (let i = 1; i <= Object.values(hops).length; i++) {
+        if (
+          hops[i]?.ipeeInfo?.country !== "" &&
+          hops[i]?.ipeeInfo?.country !== route[route.length - 1]
+        ) {
+          route = [...route, hops[i].ipeeInfo.country];
+        }
+      }
     } catch (error) {
       console.log(error);
       error = error.message;
@@ -49,103 +91,137 @@
 
   EventsOn("hop", (hop: Hop) => {
     hops[hop.number] = hop;
-    hopsEelement.lastElementChild.scrollIntoView({ behavior: "smooth" });
+    hopsEelement?.lastElementChild?.scrollIntoView({ behavior: "smooth" });
   });
 
   EventsOn("hop info", (hop: Hop) => {
-    console.log(hop);
     hops[hop.number] = hop;
-    if (
-      hop.ipeeInfo.country !== "" &&
-      hop.ipeeInfo.country !== route[route.length - 1]
-    ) {
-      route = [...route, hop.ipeeInfo.country];
-    }
+    // if (
+    //   hop.ipeeInfo.country !== "" &&
+    //   hop.ipeeInfo.country !== route[route.length - 1]
+    // ) {
+    //   route = [...route, hop.ipeeInfo.country];
+    // }
   });
 
   onMount(async () => {
     try {
+      protocol.onchange = ()=>{
+        protocolValue = protocol.value
+      }
+      ip.value = "85.15.17.13";
+      maxHops.value = "32";
+      timeout.value = "1000";
+      destinationPort.value = "80"
+      mss.value = "1460"
       version = await GetVersion();
       const temp = await GetPublicIP();
       if (temp.startsWith("error")) {
         error = temp.slice(5);
         publicIP = "Unknown";
       } else publicIP = temp;
+      const res = await GetInterfaces();
+      for(let i =0 ;i<res.length;i++) interfaces.push(res[i])
+      interfaces = [...interfaces]
+      await sleep(500);
+      bindOn.selectIndex(0);
     } catch (error) {
       console.log(error);
     }
   });
 </script>
 
-<div class="absolute left-4 bottom-1 z-10 text-neutral-700 font-bold">
-  v{version}
-</div>
-<div class="absolute right-4 bottom-1 z-10 text-neutral-700 font-bold">
-  Public IP: {publicIP}
-</div>
-
-<main
-  class="bg-neutral-950 overflow-hidden pt-4 px-4 pb-8 text-neutral-50 w-full h-[100vh] flex flex-col"
->
-  <form class="flex items-center mb-4">
-    <input
-      class="border-2 border-neutral-800 placeholder:text-neutral-600 font-bold bg-neutral-950 text-xl tracking-wide px-4 py-2 rounded focus:outline-none w-full outline-none"
-      autocomplete="off"
-      bind:value={ip}
-      id="name"
-      type="text"
-      placeholder="IP ADDRESS"
-      disabled={loading}
-    />
-    <button
-      on:click={trace}
-      disabled={loading}
-      class="bg-blue-700 text-xl tracking-wide font-bold ml-2 rounded px-4 py-2 {loading
-        ? 'opacity-50'
-        : 'hover:bg-blue-800'}">TRACE</button
-    >
-  </form>
-  <div class="grid grid-cols-2 gap-4 mb-4">
-    <div class="flex items-center relative">
-      <div
-        class="absolute right-4 text-neutral-600 font-bold text-lg select-none"
-      >
-        MAX HOPS
-      </div>
-      <input
-        class="border-2 text-lg font-bold border-neutral-800 bg-neutral-950 w-full px-4 py-2 rounded focus:outline-none outline-none"
-        autocomplete="off"
-        bind:value={maxHops}
-        id="name"
-        type="number"
-        disabled={loading}
-      />
+<div class="relative h-svh bg-dark-surface text-dark-onSurface">
+  <!-- version and public ip -->
+  <div
+    class="w-full flex justify-between fixed bottom-0 text-sm bg-dark-surface"
+  >
+    <!-- version -->
+    <div class="m-4">
+      v{version}
     </div>
-    <div class="flex items-center relative">
-      <div
-        class="absolute right-4 text-neutral-600 font-bold text-lg select-none"
-      >
-        TIMEOUT(ms)
-      </div>
-      <input
-        class="border-2 text-lg font-bold border-neutral-800 bg-neutral-950 w-full px-4 py-2 rounded focus:outline-none outline-none"
-        autocomplete="off"
-        bind:value={timeout}
-        id="name"
-        type="number"
-        disabled={loading}
-      />
+
+    <!-- public ip -->
+    <div class="m-4">
+      {publicIP}
     </div>
   </div>
+
+  <!-- inputs -->
+  <form
+    action="#"
+    on:submit|preventDefault
+    class="grid grid-cols-6 bg-dark-surface items-center gap-4 p-4 w-full mx-auto sticky top-0 shadow"
+  >
+    <md-outlined-text-field
+      bind:this={ip}
+      label="Destination"
+      disabled={loading}
+      class="col-span-2 grid"
+    />
+    <md-outlined-select label="Protocol" bind:this={protocol} disabled={loading} class="col-span-2">
+        <md-select-option value="icmp" selected>ICMP</md-select-option>
+        <md-select-option value="tcp">TCP</md-select-option>
+    </md-outlined-select>
+    <md-outlined-text-field
+      bind:this={maxHops}
+      label="Max Hops"
+      disabled={loading}
+    />
+    <md-outlined-text-field
+      bind:this={timeout}
+      label="Timeout"
+      disabled={loading}
+    />
+    <md-outlined-select label="Interface" bind:this={bindOn} disabled={loading} class="col-span-2" id="interface">
+      {#each interfaces as i}
+        <md-select-option value={i[0]}>
+            <div class="font-bold">{i[0]}</div>
+            <div class="text-sm">{i[1]}</div>
+        </md-select-option>
+      {/each}
+    </md-outlined-select>
+    <md-outlined-text-field
+                bind:this={destinationPort}
+                label="Dst Port"
+                disabled={loading}
+                class="{protocolValue !== "tcp" && "hidden"}"
+    />
+    <md-outlined-text-field
+                bind:this={mss}
+                label="MSS"
+                disabled={loading}
+                class="{protocolValue !== "tcp" && "hidden"}"
+    />
+    <div class="col-span-6 flex justify-end">
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <md-filled-button
+      on:click={() => {
+        if (loading) StopTrace();
+        else trace();
+      }}
+      >{loading ? "CANCEL" : "TRACE"}</md-filled-button
+    >
+        </div>
+  </form>
+
+  <!-- error message -->
   {#if error}
-    <div class="text-red-600 font-semibold mb-4">{error}</div>
+      <div
+        class="mx-4 mb-4 xl:w-fit px-4 py-2 rounded-xl shadow bg-dark-errorContainer text-dark-onErrorContainer"
+      >
+        {error}
+      </div>
   {/if}
+
+  <!-- table -->
   <div
     bind:this={hopsEelement}
-    class="w-full overflow-y-scroll h-full p-4 bg-neutral-900 rounded"
+    class="w-full rounded-xl pb-32"
   >
+    <!-- table head -->
     <div
-      class="w-full grid grid-cols-12 font-semibold tracking-wide grid-flow-col gap-1 border-b-2 pb-2 mb-2 border-neutral-800"
+      class="text-lg mx-4 grid grid-cols-12 grid-flow-col gap-1 border-b pb-2 mb-2 border-dark-surfaceContainer"
     >
       <span class="col-span-1">#</span>
       <span class="col-span-3">Address</span>
@@ -155,47 +231,42 @@
     </div>
     {#each Object.values(hops) as hop}
       <div
-        class="w-full grid grid-cols-12 grid-flow-col gap-1 my-1 hover:bg-neutral-800 px-1 {hop.address ===
-          ip && 'text-green-500 font-bold'}"
+        class="grid grid-cols-12 grid-flow-col gap-1 mx-4 my-1 {(hop.address ===
+          ip.value ||
+          hop.address === lastSuccessfulDestination) &&
+          'text-dark-primary text-lg'}"
         transition:fly={{ duration: 100, y: 10 }}
       >
+        <!-- hop number -->
         <span class="col-span-1">
           {hop.number}
         </span>
+        <!-- src -->
         <span class="col-span-3 flex">
-          {hop.address === "timeout" ? "*" : hop.address}
+          {hop.timedOut ? "*" : hop.address === ip.value && protocol.value === "tcp" ? `${hop.address}:${destinationPort.value}`:hop.address}
         </span>
+        <!-- rtt -->
         <span class="col-span-2">
-          {hop.address === "timeout" ? "*" : `${hop.rtt}ms`}
+          {hop.timedOut ? "*" : `${hop.rtt}ms`}
         </span>
+        <!-- country -->
         <span class="col-span-2 truncate flex items-center">
-          {#if hop.address === "timeout" || hop.isPrivate}
+          {#if hop.timedOut || hop.isPrivate}
             *
           {:else if hop.ipeeInfo.countryCode}
             {hop.ipeeInfo.countryCode}
           {:else}
-            <span class="relative flex h-2 w-2 ml-1">
-              <span
-                class="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-600 opacity-75"
-              ></span>
-              <span class="relative inline-flex rounded-full h-2 w-2 bg-sky-700"
-              ></span>
-            </span>
+              <md-circular-progress indeterminate />
           {/if}
         </span>
+        <!-- isp -->
         <span class="col-span-4 truncate flex items-center">
-          {#if hop.address === "timeout" || hop.isPrivate}
+          {#if hop.timedOut || hop.isPrivate}
             *
           {:else if hop.ipeeInfo.organizationName}
             {hop.ipeeInfo.organizationName}
           {:else}
-            <span class="relative flex h-2 w-2 ml-1">
-              <span
-                class="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-600 opacity-75"
-              ></span>
-              <span class="relative inline-flex rounded-full h-2 w-2 bg-sky-700"
-              ></span>
-            </span>
+              <md-circular-progress indeterminate />
           {/if}
         </span>
       </div>
@@ -207,13 +278,24 @@
     {/if}
   </div>
 
+  <!-- countries -->
   {#if route.length}
-    <div class="p-4 bg-neutral-900 rounded mt-4 font-semibold">
+    <div
+      transition:fly
+      class="bg-dark-tertiary w-full shadow p-4 fixed bottom-12 text-sm text-dark-onTertiary"
+    >
       {#each route as country}
-        <span class="mr-2">→</span><span class="mr-2 text-lg tracking-wide"
-          >{country}</span
-        >
+        <span>→</span><span class="mx-2">{country}</span>
       {/each}
     </div>
   {/if}
-</main>
+</div>
+
+<style>
+:root {
+  --md-circular-progress-size: 24px;
+}
+#interface{
+  --md-outlined-select-text-field-input-text-size: 12px;
+}
+</style>
