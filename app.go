@@ -136,11 +136,7 @@ func ARPRequest(handle *pcap.Handle, iface *net.Interface, srcIP net.IP, dstIP n
 
 	// Serialize the layers
 	buffer := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-	err := gopacket.SerializeLayers(buffer, opts, &eth, &arp)
+	err := gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, &eth, &arp)
 	if err != nil {
 		return nil, err
 	}
@@ -152,35 +148,37 @@ func ARPRequest(handle *pcap.Handle, iface *net.Interface, srcIP net.IP, dstIP n
 	}
 
 	// Set a BPF filter to only capture ARP responses
-	err = handle.SetBPFFilter(fmt.Sprintf("arp and src host %s", dstIP.String()))
-	if err != nil {
-		return nil, err
-	}
+	// err = handle.SetBPFFilter("arp")
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	done := make(chan net.HardwareAddr)
 
 	// Wait for the ARP reply
-	start := time.Now()
-	for {
-		if time.Since(start) > 3*time.Second {
-			return nil, fmt.Errorf("timeout getting ARP reply")
+	go func() {
+		for {
+			data, _, err := handle.ReadPacketData()
+			if err != nil {
+				continue
+			}
+			packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+			arpLayer := packet.Layer(layers.LayerTypeARP)
+			if arpLayer == nil {
+				continue
+			}
+			arp := arpLayer.(*layers.ARP)
+			if arp.Operation != layers.ARPReply || !net.IP(arp.SourceProtAddress).Equal(dstIP) {
+				continue
+			}
+			done <- net.HardwareAddr(arp.SourceHwAddress)
 		}
-
-		data, _, err := handle.ReadPacketData()
-		if err != nil {
-			continue
-		}
-
-		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-		arpLayer := packet.Layer(layers.LayerTypeARP)
-		if arpLayer == nil {
-			continue
-		}
-
-		arp := arpLayer.(*layers.ARP)
-		if arp.Operation != layers.ARPReply || !net.IP(arp.SourceProtAddress).Equal(dstIP) {
-			continue
-		}
-
-		return net.HardwareAddr(arp.SourceHwAddress), nil
+	}()
+	select {
+	case a := <-done:
+		return a, nil
+	case <-time.After(time.Second * 5):
+		return nil, errors.New("Timed out waiting for arp reply")
 	}
 }
 
@@ -673,77 +671,114 @@ func (a *App) GetInterfaces() ([][]string, error) {
 	}
 
 	var temp [][]string
+	var wg sync.WaitGroup
 
 	// filter interfaces that can send packets
 	for _, i := range devs {
-		// open interface
-		handle, err := pcap.OpenLive(i.Name, 65532, true, pcap.BlockForever)
-		if err != nil {
-			fmt.Printf("failed to open device: %s\n", i.Name)
-			continue
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("checking ", i.Description)
+			// open interface
+			handle, err := pcap.OpenLive(i.Name, 65536, true, pcap.BlockForever)
+			if err != nil {
+				fmt.Printf("failed to open device: %s\n", i.Name)
+				return
+			}
 
-		// check interface type
-		if !strings.EqualFold(handle.LinkType().String(), "raw") && !strings.EqualFold(handle.LinkType().String(), "ethernet") {
-			fmt.Printf("link type not supported: %s\n", handle.LinkType().String())
-			continue
-		}
+			// check interface type
+			if !strings.EqualFold(handle.LinkType().String(), "raw") && !strings.EqualFold(handle.LinkType().String(), "ethernet") {
+				fmt.Printf("link type not supported: %s\n", handle.LinkType().String())
+				return
+			}
 
-		// get go native interface
-		goInterface, err := FindGoInterfaceByFromPcapInterface(i, goInterfaces)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-
-		// get interface ip and gateway
-		sourceIP, gatewayIP, err := FindInterfaceIPV4Address(goInterface, handle.LinkType().String())
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-
-		// get gateways's mac address if link type is ethernet
-		if strings.EqualFold(handle.LinkType().String(), "ethernet") {
-			// Get gateway's MAC address using ARP
-			gatewayMac, err := ARPRequest(handle, goInterface, sourceIP, gatewayIP)
+			// get go native interface
+			goInterface, err := FindGoInterfaceByFromPcapInterface(i, goInterfaces)
 			if err != nil {
 				fmt.Println(err)
-				continue
+				return
 			}
 
-			fmt.Printf("Resolved MAC address for %s: %s\n", gatewayIP, gatewayMac)
-			interfaces[i.Name] = CustomInterface{Type: "ethernet", Interface: i, GatewayMac: gatewayMac, InterfaceMac: goInterface.HardwareAddr, InterfaceIP: sourceIP}
-			temp = append(temp, []string{i.Name, sourceIP.String()})
-		} else if strings.EqualFold(handle.LinkType().String(), "raw") {
-			// create ipv4 packet
-			ipv4Packet := CreateIPV4Packet(uint16(rand.Uint32()), 64, layers.IPProtocolICMPv4, sourceIP, gatewayIP)
-
-			// create icmp packet
-			icmpPacket := layers.ICMPv4{
-				TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
-				Id:       uint16(rand.Uint32()),
-				Seq:      1,
+			// get interface ip and gateway
+			sourceIP, gatewayIP, err := FindInterfaceIPV4Address(goInterface, handle.LinkType().String())
+			if err != nil {
+				fmt.Println(err)
+				return
 			}
 
-			// Create serialize buffer
-			buffer := gopacket.NewSerializeBuffer()
+			// skip apipa range
+			_, n, _ := net.ParseCIDR("169.254.1.0/16")
 
-			// serialize layers
-			if err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, &ipv4Packet, &icmpPacket); err != nil {
-				return nil, err
+			if n.Contains(sourceIP) {
+				fmt.Printf("skipping interface with apipa %s\n", sourceIP)
+				return
 			}
 
-			// write packet
-			if err = handle.WritePacketData(buffer.Bytes()); err != nil {
-				return nil, err
+			// get gateways's mac address if link type is ethernet
+			if strings.EqualFold(handle.LinkType().String(), "ethernet") {
+				// Get gateway's MAC address using ARP
+				gatewayMac, err := ARPRequest(handle, goInterface, sourceIP, gatewayIP)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+
+				fmt.Printf("Resolved MAC address for %s: %s\n", gatewayIP, gatewayMac)
+				interfaces[goInterface.Name] = CustomInterface{Type: "ethernet", Interface: i, GatewayMac: gatewayMac, InterfaceMac: goInterface.HardwareAddr, InterfaceIP: sourceIP}
+				temp = append(temp, []string{goInterface.Name, sourceIP.String()})
+			} else if strings.EqualFold(handle.LinkType().String(), "raw") {
+				// create ipv4 packet
+				ipv4Packet := CreateIPV4Packet(uint16(rand.Uint32()), 64, layers.IPProtocolICMPv4, sourceIP, gatewayIP)
+
+				// create icmp packet
+				icmpPacket := layers.ICMPv4{
+					TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+					Id:       uint16(rand.Uint32()),
+					Seq:      1,
+				}
+
+				// Create serialize buffer
+				buffer := gopacket.NewSerializeBuffer()
+
+				// serialize layers
+				if err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, &ipv4Packet, &icmpPacket); err != nil {
+					fmt.Println(err)
+					return
+				}
+
+				writeErrorChannel := make(chan error)
+
+				// write packet
+				go func() {
+					err = handle.WritePacketData(buffer.Bytes())
+					if err != nil {
+						writeErrorChannel <- err
+					} else {
+						writeErrorChannel <- nil
+					}
+				}()
+
+				select {
+				case e := <-writeErrorChannel:
+					if e != nil {
+						fmt.Println(e)
+						return
+					}
+				case <-time.After(time.Second * 3):
+					fmt.Println("failed to write packet")
+					return
+				}
+
+				fmt.Printf("sent icmp packet from %s to %s\n", sourceIP, gatewayIP)
+				interfaces[goInterface.Name] = CustomInterface{Type: "raw", Interface: i, InterfaceIP: sourceIP}
+				temp = append(temp, []string{goInterface.Name, sourceIP.String()})
 			}
 
-			fmt.Printf("sent icmp packet from %s to %s\n", sourceIP, gatewayIP)
-			interfaces[i.Name] = CustomInterface{Type: "raw", Interface: i, InterfaceIP: sourceIP}
-			temp = append(temp, []string{goInterface.Name, sourceIP.String()})
-		}
+			handle.Close()
+		}()
 	}
+
+	wg.Wait()
 
 	return temp, nil
 }
