@@ -1,4 +1,4 @@
-module lycaon
+module lycan
 
 go 1.23.2
 

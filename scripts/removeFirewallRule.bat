@@ -1,1 +1,1 @@
-netsh advfirewall firewall delete rule name=Lycaon
+netsh advfirewall firewall delete rule name=Lycan

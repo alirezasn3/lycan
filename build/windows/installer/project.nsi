@@ -32,7 +32,7 @@ Unicode true
 ####
 ## Include the wails tools
 ####
-#!define ARG_WAILS_AMD64_BINARY "..\..\bin\Lycaon.exe"
+#!define ARG_WAILS_AMD64_BINARY "..\..\bin\Lycan.exe"
 !include "wails_tools.nsh"
 
 # The version information for this two must consist of 4 parts
@@ -97,7 +97,7 @@ Section
 
     !insertmacro wails.writeUninstaller
  
-    Exec 'netsh advfirewall firewall add rule name=Lycaon protocol=icmpv4:11,any dir=in action=allow'
+    # Exec 'netsh advfirewall firewall add rule name=Lycan protocol=icmpv4:11,any dir=in action=allow'
 SectionEnd
 
 Section "uninstall"
@@ -115,5 +115,5 @@ Section "uninstall"
 
     !insertmacro wails.deleteUninstaller
 
-    Exec 'netsh advfirewall firewall delete rule name=Lycaon'
+    # Exec 'netsh advfirewall firewall delete rule name=Lycan'
 SectionEnd
